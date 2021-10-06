@@ -1,0 +1,189 @@
+Fastq -> Trimming -> Alignment -> Remove duplicate -> MACS2 peakcalling (--keepdup all) -> Turn to R
+
+
+======================================================================================================================
+#1. Download rawdata, QC and Triming 
+# Set paths
+# baseDir=/media/hkh/8TB/XUANTHANG/INO80_ESC_MEF/ChIPseq  
+cd /media/hkh/8TB/XUANTHANG/INO80_ESC_MEF/ChIPseq
+
+mkdir -p Data/sra Data/Fastq Data/FastQC Data/Trimming
+mkdir -p Results/bowtie2 Results/bedtools Results/MACS2 Results/sambamba Results/ChIPQC Results/DiffBind Results/deepTools Results/Homer Results/deepTools/plotHeatmap Results/deepTools/computeMatrix
+
+# Loading all the modules
+export PATH=/media/hkh/8TB/XUANTHANG/TOOLS/sratoolkit.2.10.9-ubuntu64/bin:$PATH
+
+# ChIPseq SINGLE-END
+prefetch --option-file Data/ChIPseq_INO80_SRA.txt --output-directory Data/sra
+fastq-dump Data/sra/SRR*/SRR* --outdir Data/Fastq --gzip
+fastqc -t 6 -o Data/FastQC --noextract -f fastq Data/Fastq/SRR*
+multiqc Data/FastQC/.
+
+=====================================================================================================================
+#2 Alignment ChIPseq  (Single-end, Bowtie2 Using UCSC Mouse mm10) 
+cd /media/hkh/8TB/XUANTHANG/INO80_ESC_MEF/ChIPseq
+echo "****Running Bowtie2 to align raw reads****"
+bowtie2Ref=/media/hkh/8TB/XUANTHANG/References/Reference_Mouse/Mus_musculus_UCSC_mm10/Sequence/Bowtie2Index/genome
+
+#Alignment - SAMtoBAM
+for i in $(ls Data/Fastq/*.fastq.gz |cut -c 12- | rev | cut -c 10- | rev | uniq); do \
+bowtie2 -q -p 6 -x ${bowtie2Ref} -U Data/Fastq/${i}.fastq.gz 2> Results/bowtie2/${i}.log |
+       samtools view -h -S -b -> Results/bowtie2/${i}_unsort.bam ; done
+
+
+echo "****sorting BAM file****"
+for i in $(ls Results/bowtie2/*.bam |cut -c 17- | rev | cut -c 12- | rev | uniq); do \
+sambamba sort -t 6 Results/bowtie2/${i}_unsort.bam -o Results/bowtie2/${i}_sorted.bam ; done 
+
+#filtering Alignment file by sambamba or MarkDuplicate (Piscard - GATK tools) REMOVE_DUPLICATE=True
+#The filter given are ‘not mapped’, ‘not duplicate’, and ‘[XS] ==null’, which are connected by ‘and’ operator.
+
+echo "****Filtering reads for unique mappings****"
+for i in $(ls Results/bowtie2/*.bam |cut -c 17- | rev | cut -c 12- | rev | uniq); do \
+sambamba view -h -t 6 -f bam -F "[XS] == null and not unmapped and not duplicate" Results/bowtie2/${i}_sorted.bam > Results/sambamba/${i}.bam ; done  
+
+# Index BAM file containing uniquely aligned reads
+echo "****IndexingBAM file****"
+for i in $(ls Results/sambamba/*.bam |cut -c 18- | rev | cut -c 5- | rev | uniq); do \
+samtools index Results/sambamba/$i.bam ; done
+
+#3 MACS2_Peakcalling 
+#4.1 Predict fragment length
+cd /media/hkh/8TB/XUANTHANG/INO80_ESC_MEF/ChIPseq
+for file in Results/sambamba/*.bam
+do macs2 predictd -i $file -g hs -m 5 20  2> $file.log ; done
+
+#4.2 MACS2 callPeak
+mkdir MACS2_Peakcalling
+
+macs2 callpeak -t Results/sambamba/SRR942470.bam -c Results/sambamba/SRR942473.bam \
+		-g hs -n INO80_ESC_rep1 -f BAM -B --nomodel --extsize 292 \
+		--outdir Results/MACS2 --keep-dup all 2> Results/MACS2/INO80_ESC_rep1.log
+macs2 callpeak -t Results/sambamba/SRR942471.bam -c Results/sambamba/SRR942474.bam \
+		-g hs -n INO80_ESC_rep2 -f BAM -B --nomodel --extsize 292 \
+		--outdir Results/MACS2 --keep-dup all 2> Results/MACS2/INO80_ESC_rep2.log
+macs2 callpeak -t Results/sambamba/SRR942472.bam -c Results/sambamba/SRR942474.bam \
+		-g hs -n INO80_ESC_rep3 -f BAM -B --nomodel --extsize 294 \
+		--outdir Results/MACS2 --keep-dup all 2> Results/MACS2/INO80_ESC_rep3.log
+macs2 callpeak -t Results/sambamba/SRR5309424.bam -c Results/sambamba/SRR5309422.bam \
+		-g hs -n INO80_MEF_rep1 -f BAM -B --nomodel --extsize 367 \
+		--outdir Results/MACS2 --keep-dup all 2> Results/MACS2/INO80_ESC_rep1.log
+macs2 callpeak -t Results/sambamba/SRR5658440.bam -c Results/sambamba/SRR5658438.bam \
+		-g hs -n INO80_MEF_rep2 -f BAM -B --nomodel --extsize 364 \
+		--outdir Results/MACS2 --keep-dup all 2> Results/MACS2/INO80_ESC_rep2.log
+wc -l Results/MACS2/*.narrowPeak	
+
+
+#Or Using MACS2bdgdiff
+
+macs2 callpeak -t Results/sambamba/SRR942470.bam Results/sambamba/SRR942471.bam Results/sambamba/SRR942472.bam \
+		-c Results/sambamba/SRR942473.bam Results/sambamba/SRR942474.bam \
+		-B -n ESC_callpeak_for_bdgdiff --nomodel --extsize 292 \
+		--keep-dup all --outdir Results/bdgdiff 2> Results/bdgdiff/INO80_ESC.log
+macs2 callpeak -t Results/sambamba/SRR5309424.bam Results/sambamba/SRR5658440.bam \
+		-c Results/sambamba/SRR5309422.bam Results/sambamba/SRR5309422.bam \
+		-B -n MEF_callpeak_for_bdgdiff --nomodel --extsize 367 \
+		--keep-dup all --outdir Results/bdgdiff 2> Results/bdgdiff/INO80_MEF.log
+
+macs2 bdgdiff 	--t1 Results/bdgdiff/ESC_callpeak_for_bdgdiff_treat_pileup.bdg \
+		--c1 Results/bdgdiff/ESC_callpeak_for_bdgdiff_control_lambda.bdg \
+		--t2 Results/bdgdiff/MEF_callpeak_for_bdgdiff_treat_pileup.bdg \
+		--c2 Results/bdgdiff/MEF_callpeak_for_bdgdiff_control_lambda.bdg \
+		--d1 13978459 --d2 24955016 --o-prefix Results/bdgdiff/diff_ESC_vs_MEF 2> Results/bdgdiff/diff_ESC_vs_MEF.log
+
+
+awk -F"\t" '{OFS="\t"} NR>1 {print $1, $2, $3}' Results/bdgdiff/diff_ESC_vs_MEF_c3.0_common.bed | head | column -t
+awk -F"\t" '{OFS="\t"} NR>1 {print $1, $2, $3}' Results/bdgdiff/diff_ESC_vs_MEF_c3.0_common.bed | wc -l 
+
+awk -F"\t" '{OFS="\t"} NR>1 {print $1, $2, $3}' Results/bdgdiff/diff_ESC_vs_MEF_c3.0_common.bed > Results/bdgdiff/INO80_ESC_vs_MEF_common.txt
+awk -F"\t" '{OFS="\t"} NR>1 {print $1, $2, $3}' Results/bdgdiff/diff_ESC_vs_MEF_c3.0_cond1.bed > Results/bdgdiff/INO80_ESC_unique.txt
+awk -F"\t" '{OFS="\t"} NR>1 {print $1, $2, $3}' Results/bdgdiff/diff_ESC_vs_MEF_c3.0_cond2.bed > Results/bdgdiff/INO80_MEF_unique.txt
+
+
+#4.3 Handling with replicates (bedtools intersect OR IDR)
+
+for i in $(ls Results/MACS2/*.narrowPeak |cut -c 15- | rev | cut -c 18- | rev | uniq); do \
+sort -k8,8nr Results/MACS2/${i}_peaks.narrowPeak > Results/MACS2/${i}_sorted.narrowPeak ; done
+
+mkdir Results/idr
+idr --samples Results/MACS2/INO80_ESC_rep2_sorted.narrowPeak Results/MACS2/INO80_ESC_rep3_sorted.narrowPeak \
+--input-file-type narrowPeak --rank q.value -o Results/idr/INO80_ESC_idr.bed --plot -l Results/idr/INO80_ESC_idr.log
+idr --samples Results/MACS2/INO80_MEF_rep1_sorted.narrowPeak Results/MACS2/INO80_MEF_rep2_sorted.narrowPeak \
+--input-file-type narrowPeak --rank q.value -o Results/idr/INO80_MEF_idr.bed --plot -l Results/idr/INO80_MEF_idr.log
+#Generate bed file with
+awk '{if($5 >= 540) print $0}' Results/idr/INO80_ESC_idr > Results/idr/INO80_ESC_idr.bed && wc -l Results/idr/INO80_ESC_idr.bed
+awk '{if($5 >= 540) print $0}' Results/idr/INO80_MEF_idr > Results/idr/INO80_MEF_idr.bed && wc -l Results/idr/INO80_MEF_idr.bed
+# or awk '{if($12 > 1.3) print $0}' Results/idr/INO80_MEF_idr | wc -l
+
+# 4.4 Homer for motif finding
+Data was genereted by annotation in R 
+findMotifsGenome.pl Results/Annotation/Common_INO80_TSS_ESC_MEF_peaks_annotation.txt mm10 Results/Homer/Common_INO80_TSS_ESC_MEF -size 200 -cpu 6 
+
+#4.5 Generate Heatmap and Visualiztion using deeptools
+
+bamCoverage --bam a.bam -o a.SeqDepthNorm.bw \
+    --binSize 10 \
+    --normalizeUsing RPGC \
+    --effectiveGenomeSize 2150570000 \
+    --ignoreForNormalization chrX chrY \
+    --centerReads \
+    --extendReads 150
+
+
+
+
+
+#!/bin/bash
+conda activate deepTools
+export bigwigDir="/home/sebastian/Data/Tremethick/Breast/PromoterSeqCap/processed_data/GRCh37_hg19_UCSC/deepTools/bamCoverage/MNase/RPKM"
+export plotDir="/home/sebastian/Data/Tremethick/Breast/PromoterSeqCap/processed_data/GRCh37_hg19_UCSC/deepTools/plotHeatmap"
+export matrixDir="/home/sebastian/Data/Tremethick/Breast/PromoterSeqCap/processed_data/GRCh37_hg19_UCSC/deepTools/computeMatrix"
+export bedFile="/home/sebastian/Data/Tremethick/Breast/PromoterSeqCap/2000randompromotersHG19.bed"
+
+cd ~/Data/Tremethick/Breast/PromoterSeqCap
+
+computeMatrix reference-point -S $bigwigDir/MCF10A_WT_Input.Total.bw\
+                                 $bigwigDir/MCF10A_TGFb_Input.Total.bw\  
+                                 $bigwigDir/MCF10A_shH2AZ_Input.Total.bw\
+                                 $bigwigDir/MCF10CA1a_WT_Input.Total.bw\
+                              -R $bedFile \
+                              --outFileName $matrixDir/InputTotalMatrix.gz\
+                              --outFileNameMatrix $matrixDir/InputTotalMatrix.tab\
+                              --outFileSortedRegions $matrixDir/InputTotalMatrix.bed\
+                              --referencePoint center\
+                              --beforeRegionStartLength 1000\
+                              --afterRegionStartLength 1000\
+                              --binSize 10\
+                              --smartLabels\
+                              --numberOfProcessors 32\
+&
+
+plotHeatmap --matrixFile $matrixDir/InputTotalMatrix.gz\
+            --outFileName $plotDir/kmeans/InputTotalMatrix.pdf\
+            --outFileNameMatrix $plotDir/kmeans/InputTotalMatrix.tab\
+            --outFileSortedRegions $plotDir/kmeans/InputTotalMatrix.bed\
+            --kmeans 7\
+&
+
+plotHeatmap --matrixFile $matrixDir/InputTotalMatrix.gz\
+            --outFileName $plotDir/kmeans/InputTotalMatrix_sorton1.pdf\
+            --outFileNameMatrix $plotDir/kmeans/InputTotalMatrix_sorton1.tab\
+            --outFileSortedRegions $plotDir/kmeans/InputTotalMatrix_sorton1.bed\
+            --kmeans 7\
+            --sortUsingSamples 1\
+&
+
+computeMatrixOperations subset --matrixFile $matrixDir/InputTotalMatrix.gz\
+                               --samples MCF10A_WT_Input.Total\
+                               --outFileName $matrixDir/InputTotalMatrix_WT.gz
+
+plotHeatmap --matrixFile $matrixDir/InputTotalMatrix_WT.gz\
+            --outFileName $plotDir/kmeans/InputTotalMatrix_WT.pdf\
+            --outFileSortedRegions $plotDir/kmeans/InputTotalMatrix_WT.bed\
+            --kmeans 7\
+&
+
+plotHeatmap --matrixFile $matrixDir/InputTotalMatrix.gz\
+            --outFileName $plotDir/kmeans/InputTotalMatrix_sortedOnWT.pdf\
+            
+&                           
